@@ -14,16 +14,20 @@ import java.util.regex.Pattern;
 
 public class TheRealDeal {
 
-    PrnMask oldPrnMask;
-    PrnMask currentPrnMask;
+    PrnMask[] prnMasks;
+    SpaceVehicle[] svList = SpaceVehicle.setSpaceVehicleArray(210);
 
     private String message;
-    private int iodp, firstIodp;
+
+    //The following fields are used as temporary storage spaces by different functions
+    private int iodp;
     int positionVariable;
     int[] prnMask = new int[210];
+
     int weekNum;
     float weekSecs;
-    SpaceVehicle[] svList = SpaceVehicle.setSpaceVehicleArray(210);
+
+    private static final Pattern iodpPattern = Pattern.compile("IODP:([0-3])");
 
     public static final int IODP_NOT_FOUND_ERROR = -1;
     public static final int IODP_MISMATCH_ERROR = -2;
@@ -36,8 +40,9 @@ public class TheRealDeal {
 
     public int messageExtract(String fileName){
         message = getMessageFromFile(fileName);
+        archiveAllIodps();
 
-        firstIodp = getFirstIodp();
+        /*firstIodp = getFirstIodp();
         populatePrnMaskAndFixLastIodp();
         currentPrnMask = new PrnMask(prnMask, iodp);
         
@@ -46,7 +51,7 @@ public class TheRealDeal {
             oldPrnMask = new PrnMask(prnMask, iodp);
             CHECK_OLD_PRN_MASK = 1; //Flag is raised
             //return IODP_MISMATCH_ERROR;     //Here, this may also mean that interpretMessageType1() has failed
-        }
+        }*/
 
         if ((positionVariable = message.lastIndexOf("WAAS2A"))>0){
             interpretMessageType2to5(2, positionVariable);
@@ -108,7 +113,6 @@ public class TheRealDeal {
 
     private int interpretMessageType1(int messagePosition){      //Consider error handling based on return value
 
-        Pattern iodpPattern = Pattern.compile("IODP:([0-3])");      //Exception handling in case IODP is not in the range 0-3 (which is most probably not possible)
         Pattern prnBitPattern = Pattern.compile("[01]");            //Same as above
         Matcher matchPrnBitPattern = prnBitPattern.matcher(message);
         Matcher matchIodpPattern = iodpPattern.matcher(message);
@@ -141,12 +145,11 @@ public class TheRealDeal {
 
     private void interpretMessageType2to5(int messageType, int messagePosition){
 
-        Pattern iodp2to5 = Pattern.compile("IODP:([0-3])");
         Pattern fcPattern = Pattern.compile("(-*[0-9]+\\.[0-9]+)\\b");
         Pattern udreiPattern = Pattern.compile("([0-9]+)\\b");      //Here, there's no verification of the udrei number
         Pattern satTimePattern = Pattern.compile("SATTIME:([0-9]+),([0-9]+\\.[0-9]+)\\b");
 
-        Matcher matchIodp2to5 = iodp2to5.matcher(message);
+        Matcher matchIodp2to5 = iodpPattern.matcher(message);
         Matcher matchfcPattern = fcPattern.matcher(message);
         Matcher matchUdreiPattern = udreiPattern.matcher(message);
         Matcher matchSatTimePattern = satTimePattern.matcher(message);
@@ -164,12 +167,18 @@ public class TheRealDeal {
 
         matchIodp2to5.find();
         iodp = Integer.parseInt(matchIodp2to5.group(1));
-        if (iodp == currentPrnMask.iodp)
-            prnMask = currentPrnMask.prnMask;
-        else if (CHECK_OLD_PRN_MASK==1 && iodp == oldPrnMask.iodp)
-            prnMask = oldPrnMask.prnMask;
-        else
-            return;     //If the IODP of message matches neither, then it is ignored
+        int j = 0;
+        boolean IODP_FOUND = false;
+        while (prnMasks[j] != null){
+            if (prnMasks[j].iodp == iodp){
+                prnMask = prnMasks[j].prnMask;
+                IODP_FOUND = true;
+                break;
+            }
+            j++;
+        }
+        if (!IODP_FOUND)
+            return;
 
         int activeSatCount = 0, startCount, endCount;
         switch (messageType){
@@ -192,8 +201,6 @@ public class TheRealDeal {
             default:
                 return;
         }
-        /*The following loop takes care of the fact that as soon as the new message comes, the array region is reset, as the previous message becomes invalid
-        * Loop to be made!*/
 
         for (int i = 0; i<prnMask.length; i++){
             if (prnMask[i] == 1){
@@ -208,6 +215,9 @@ public class TheRealDeal {
                         svList[i].udrei = Integer.parseInt(matchUdreiPattern.group(1));
                     }
                 }
+            }
+            else if (prnMask[i] == 0){          //To clear out the previous corrections
+                svList[i].fastCorrection = 0;
             }
         }
     }
@@ -232,27 +242,30 @@ public class TheRealDeal {
         return text;
     }
 
-    //The first iodp is checked with the last iodp to ensure that the PRN mask has been retained throughout the message
-    /*Loophole: If the PRN mask may change 4 times, the iodp will circle back to the same value by the end of the message.
-    * This is assumed to be very rare*/
-    private int getFirstIodp(){
-        int firstPrnPosition = message.indexOf("WAAS1A");
-        Pattern iodp = Pattern.compile("IODP:([0-3])");
-        Matcher matcher = iodp.matcher(message);
-        matcher = matcher.region(firstPrnPosition, firstPrnPosition + 15);    //15 is a safe limit in which we are bound to find the IODP
+    /*The following function surfs through the entire correction file, looking for WAAS1A messages, and registers
+    * all PRN bit masks with different IODPs into an array of PrnMask objects  called prnMasks[]*/
+    public void archiveAllIodps(){
 
-        if (matcher.find()){
-            return Integer.parseInt(matcher.group(1));
+        prnMasks = new PrnMask[4];      //Ready for the rare occasion when there are 3 changes in PRN mask with IODPs 0,1,2,3
+        positionVariable = -1;      //So that positionVariable + 1 will be 0 in the first iteration
+        Matcher matchIodpPattern = iodpPattern.matcher(message);
+
+        while ((positionVariable = message.indexOf("WAAS1A", positionVariable+1)) >= 0){
+            matchIodpPattern = matchIodpPattern.region(positionVariable, positionVariable + 15);
+            matchIodpPattern.find();
+            iodp = Integer.parseInt(matchIodpPattern.group(1));
+            for (int i = 0; i < 4; i++){
+                /*/The following condition means that if the referenced object is null, it means that it is either the first object, or all the
+                * previous objects' iodps did not match the iodp in hand*/
+                if (prnMasks[i] == null){
+                    prnMasks[i] = new PrnMask();
+                    interpretMessageType1(positionVariable);
+                    prnMasks[i].iodp = iodp;
+                    prnMasks[i].prnMask = prnMask;
+                }
+                else if (prnMasks[i].iodp == iodp)
+                    break;
+            }
         }
-        else
-            return IODP_NOT_FOUND_ERROR;      //In case this function has failed to get the iodp
-    }
-
-    /*This function not only extracts the most recent (last) PRN bit mask, but also returns back the
-    * IODP of the last WAAS1A message, which helps to cross check whether the PRN mask has changed
-    * through the course of the message*/
-    private int populatePrnMaskAndFixLastIodp(){
-        int lastPrnPosition = message.lastIndexOf("WAAS1A");
-        return interpretMessageType1(lastPrnPosition);
     }
 }
